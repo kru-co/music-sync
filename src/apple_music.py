@@ -64,7 +64,6 @@ end tell
 
     def get_playlists(self):
         """Return user-created playlists with their tracks."""
-        # Get playlist names first
         script = """
 tell application "Music"
     set output to ""
@@ -138,9 +137,31 @@ end tell
     # Write                                                                #
     # ------------------------------------------------------------------ #
 
-    def add_liked_songs(self, tracks, progress_cb=None):
+    def add_liked_songs(self, tracks, progress_cb=None, log_cb=None):
+        """
+        Mark tracks as Loved in the Music app.
+
+        IMPORTANT: This only works if the track already exists in your local
+        Music library. It cannot add tracks from the Apple Music catalog.
+        Tracks not already in your library will show as unmatched.
+        """
         added, failed = 0, []
         total = len(tracks)
+
+        # Count library size once for context
+        try:
+            lib_size_raw = _run_script(
+                'tell application "Music" to return count of tracks of library playlist 1'
+            )
+            lib_size = lib_size_raw.strip()
+        except RuntimeError:
+            lib_size = "unknown"
+
+        if log_cb:
+            log_cb(f"  Music library contains {lib_size} tracks. Searching for matches...")
+            log_cb(f"  Note: Only tracks already in your local library can be marked as Loved.")
+
+        match_attempts = 0
         for i, track in enumerate(tracks):
             safe_name = track["name"].replace('"', '\\"')
             safe_artist = track["artist"].replace('"', '\\"')
@@ -159,19 +180,50 @@ end tell
                 result = _run_script(script)
                 if result == "ok":
                     added += 1
+                    if log_cb and added <= 10:
+                        log_cb(f"    [MATCHED] {track['name']} by {track['artist']}")
+                    elif log_cb and added == 11:
+                        log_cb(f"    ... (logging first 10 matches only)")
                 else:
                     failed.append(track)
-            except RuntimeError:
+                    if log_cb and len(failed) <= 5:
+                        log_cb(f"    [NOT FOUND] {track['name']} by {track['artist']}")
+                    elif log_cb and len(failed) == 6:
+                        log_cb(f"    ... (showing first 5 misses, remaining logged to summary)")
+            except RuntimeError as e:
                 failed.append(track)
+                if log_cb and len(failed) <= 3:
+                    log_cb(f"    [ERROR] {track['name']} by {track['artist']}: {e}")
+
+            match_attempts += 1
+            if log_cb and match_attempts % 100 == 0:
+                log_cb(f"  Progress: {match_attempts}/{total} checked, {added} matched so far...")
 
             if progress_cb:
                 progress_cb(i + 1, total)
 
+        if log_cb:
+            log_cb(f"  Final: {added} matched in library, {len(failed)} not found.")
+            if len(failed) > 0:
+                log_cb(
+                    f"  Root cause: These {len(failed)} tracks are not in your local Music library."
+                )
+                log_cb(
+                    f"  Apple Music's AppleScript API cannot add tracks from the catalog."
+                )
+                log_cb(
+                    f"  To resolve: Manually add them via the Music app, or use a third-party"
+                    f" service like SongShift or Soundiiz which use the MusicKit API."
+                )
+
         return added, failed
 
-    def create_playlist(self, name, tracks, progress_cb=None):
+    def create_playlist(self, name, tracks, progress_cb=None, log_cb=None):
         safe_name = name.replace('"', '\\"')
-        # Create the playlist
+
+        if log_cb:
+            log_cb(f"  Creating playlist '{name}' with {len(tracks)} tracks...")
+
         _run_script(f'tell application "Music" to make new user playlist with properties {{name:"{safe_name}"}}')
 
         added, failed = 0, []
@@ -196,20 +248,29 @@ end tell
                     added += 1
                 else:
                     failed.append(track)
-            except RuntimeError:
+                    if log_cb and len(failed) <= 5:
+                        log_cb(f"    [NOT FOUND] {track['name']} by {track['artist']}")
+            except RuntimeError as e:
                 failed.append(track)
+                if log_cb and len(failed) <= 3:
+                    log_cb(f"    [ERROR] {track['name']} by {track['artist']}: {e}")
 
             if progress_cb:
                 progress_cb(i + 1, total)
 
+        if log_cb:
+            log_cb(f"  Playlist '{name}': {added}/{total} tracks added.")
+
         return added, failed
 
-    def save_albums(self, albums, progress_cb=None):
+    def save_albums(self, albums, progress_cb=None, log_cb=None):
         """Albums in Apple Music library are implicit — just report what exists."""
-        # In Music.app, albums are collections of tracks. We can't
-        # "save an album" the same way Spotify does, so we report matches.
         added, failed = 0, []
         total = len(albums)
+
+        if log_cb:
+            log_cb(f"  Checking {total} albums against local Music library...")
+            log_cb(f"  Note: Album 'saving' only checks your local library, it cannot add from catalog.")
 
         for i, album in enumerate(albums):
             safe_album = album["name"].replace('"', '\\"')
@@ -228,10 +289,16 @@ end tell
                 result = _run_script(script)
                 if result == "found":
                     added += 1
+                    if log_cb and added <= 5:
+                        log_cb(f"    [FOUND] {album['name']} by {album['artist']}")
                 else:
                     failed.append(album)
-            except RuntimeError:
+                    if log_cb and len(failed) <= 5:
+                        log_cb(f"    [NOT FOUND] {album['name']} by {album['artist']}")
+            except RuntimeError as e:
                 failed.append(album)
+                if log_cb and len(failed) <= 3:
+                    log_cb(f"    [ERROR] {album['name']} by {album['artist']}: {e}")
 
             if progress_cb:
                 progress_cb(i + 1, total)

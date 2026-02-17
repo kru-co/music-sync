@@ -325,16 +325,16 @@ class MusicSyncApp(tk.Tk):
         self._set_progress(0)
         threading.Thread(target=self._run_sync, daemon=True).start()
 
-    def _run_sync(self):
+        def _run_sync(self):
         direction = self._direction.get()
         if direction == "spotify-to-apple":
             src, dst_label = "Spotify", "Apple Music"
             read_liked = self._spotify.get_liked_songs
             read_playlists = self._spotify.get_playlists
             read_albums = self._spotify.get_saved_albums
-            write_liked = self._apple.add_liked_songs
-            write_playlist = lambda name, _, tracks, pcb: self._apple.create_playlist(name, tracks, pcb)
-            write_albums = self._apple.save_albums
+            write_liked = lambda items, pcb: self._apple.add_liked_songs(items, pcb, self._log)
+            write_playlist = lambda name, _, tracks, pcb: self._apple.create_playlist(name, tracks, pcb, self._log)
+            write_albums = lambda items, pcb: self._apple.save_albums(items, pcb, self._log)
         else:
             src, dst_label = "Apple Music", "Spotify"
             read_liked = self._apple.get_liked_songs
@@ -355,11 +355,11 @@ class MusicSyncApp(tk.Tk):
 
             total_tasks = len(tasks)
             for task_i, (label, reader, writer, is_playlist) in enumerate(tasks):
-                self._status(f"Reading {label} from {src}…")
+                self._status(f"Reading {label} from {src}...")
                 items = reader()
                 self._log(f"Found {len(items)} {label}")
 
-                self._status(f"Writing {label} to {dst_label}…")
+                self._status(f"Writing {label} to {dst_label}...")
 
                 if is_playlist:
                     all_failed = []
@@ -398,7 +398,7 @@ class MusicSyncApp(tk.Tk):
 
             self._set_progress(1.0)
             self._status("Done.")
-            self._log("✓ Transfer complete")
+            self._log("Transfer complete")
 
         except Exception as e:
             self._log(f"Error: {e}")
