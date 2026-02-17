@@ -1,292 +1,239 @@
 """
-Apple Music API client using the musickit library.
-Handles JWT generation, liked songs, playlists, and saved albums.
+Apple Music client using macOS osascript (AppleScript).
+Reads and writes directly to the Music app — no API keys required.
 """
 
-import time
+import subprocess
 import json
-import jwt
-import requests
 
 
-APPLE_MUSIC_BASE = "https://api.music.apple.com/v1"
+def _run_script(script: str) -> str:
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"AppleScript error: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def _run_script_file(path: str) -> str:
+    result = subprocess.run(
+        ["osascript", path],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"AppleScript error: {result.stderr.strip()}")
+    return result.stdout.strip()
 
 
 class AppleMusicClient:
-    def __init__(self, config):
-        self.key_path = config["key_path"]
-        self.key_id = config["key_id"]
-        self.team_id = config["team_id"]
-        self._developer_token = None
-        self._user_token = None
-
-    # ------------------------------------------------------------------ #
-    # Auth                                                                 #
-    # ------------------------------------------------------------------ #
-
-    @property
-    def developer_token(self):
-        if not self._developer_token:
-            with open(self.key_path, "r") as f:
-                private_key = f.read()
-            now = int(time.time())
-            payload = {
-                "iss": self.team_id,
-                "iat": now,
-                "exp": now + 15_777_000,  # 6 months
-            }
-            self._developer_token = jwt.encode(
-                payload,
-                private_key,
-                algorithm="ES256",
-                headers={"kid": self.key_id},
-            )
-        return self._developer_token
-
-    @property
-    def user_token(self):
-        if not self._user_token:
-            self._user_token = self._fetch_user_token()
-        return self._user_token
-
-    def _fetch_user_token(self):
-        """
-        Apple Music user tokens require a native app or web prompt.
-        This method guides the user to obtain one manually via a helper page.
-        """
-        print("\nApple Music requires a user token to access your library.")
-        print(
-            "Open this URL in Safari on a device signed into your Apple ID:\n"
-        )
-        print("  https://music.apple.com/")
-        print(
-            "\nThen paste your MusicKit user token below."
-        )
-        print(
-            "See README.md for instructions on how to get your user token.\n"
-        )
-        token = input("Apple Music User Token: ").strip()
-        return token
-
-    def _headers(self):
-        return {
-            "Authorization": f"Bearer {self.developer_token}",
-            "Music-User-Token": self.user_token,
-        }
-
-    def _get(self, path, params=None):
-        url = f"{APPLE_MUSIC_BASE}{path}"
-        response = requests.get(url, headers=self._headers(), params=params)
-        response.raise_for_status()
-        return response.json()
-
-    def _post(self, path, body):
-        url = f"{APPLE_MUSIC_BASE}{path}"
-        response = requests.post(
-            url, headers=self._headers(), json=body
-        )
-        response.raise_for_status()
-        return response.json() if response.text else {}
-
-    def _delete(self, path, params=None):
-        url = f"{APPLE_MUSIC_BASE}{path}"
-        response = requests.delete(url, headers=self._headers(), params=params)
-        response.raise_for_status()
 
     # ------------------------------------------------------------------ #
     # Read                                                                 #
     # ------------------------------------------------------------------ #
 
     def get_liked_songs(self):
+        """Return tracks where loved is true."""
+        script = """
+tell application "Music"
+    set output to ""
+    set lovedTracks to (every track of library playlist 1 whose loved is true)
+    repeat with t in lovedTracks
+        set tName to name of t
+        set tArtist to artist of t
+        set tAlbum to album of t
+        set output to output & tName & "|||" & tArtist & "|||" & tAlbum & "\\n"
+    end repeat
+    return output
+end tell
+"""
+        raw = _run_script(script)
         tracks = []
-        offset = 0
-        limit = 100
-        while True:
-            data = self._get(
-                "/me/library/songs",
-                params={"limit": limit, "offset": offset},
-            )
-            items = data.get("data", [])
-            for item in items:
-                attrs = item.get("attributes", {})
-                tracks.append(
-                    {
-                        "name": attrs.get("name"),
-                        "artist": attrs.get("artistName"),
-                        "album": attrs.get("albumName"),
-                        "isrc": attrs.get("isrc"),
-                        "duration_ms": attrs.get("durationInMillis"),
-                    }
-                )
-            if len(items) < limit:
-                break
-            offset += limit
-        print(f"  Apple Music: found {len(tracks)} liked songs")
+        for line in raw.splitlines():
+            parts = line.split("|||")
+            if len(parts) == 3:
+                tracks.append({
+                    "name": parts[0],
+                    "artist": parts[1],
+                    "album": parts[2],
+                })
         return tracks
 
     def get_playlists(self):
+        """Return user-created playlists with their tracks."""
+        # Get playlist names first
+        script = """
+tell application "Music"
+    set output to ""
+    repeat with p in (every user playlist whose special kind is none)
+        set output to output & name of p & "\\n"
+    end repeat
+    return output
+end tell
+"""
+        raw = _run_script(script)
+        playlist_names = [l for l in raw.splitlines() if l.strip()]
+
         playlists = []
-        offset = 0
-        limit = 100
-        while True:
-            data = self._get(
-                "/me/library/playlists",
-                params={"limit": limit, "offset": offset},
-            )
-            items = data.get("data", [])
-            for item in items:
-                attrs = item.get("attributes", {})
-                # Skip playlists not editable by the user
-                if not attrs.get("canEdit", True):
-                    continue
-                tracks = self._get_playlist_tracks(item["id"])
-                playlists.append(
-                    {
-                        "name": attrs.get("name"),
-                        "description": attrs.get("description", {}).get(
-                            "standard", ""
-                        ),
-                        "tracks": tracks,
-                    }
-                )
-            if len(items) < limit:
-                break
-            offset += limit
-        print(f"  Apple Music: found {len(playlists)} playlists")
+        for pl_name in playlist_names:
+            safe_name = pl_name.replace('"', '\\"')
+            track_script = f"""
+tell application "Music"
+    set output to ""
+    set pl to user playlist "{safe_name}"
+    repeat with t in (every track of pl)
+        set tName to name of t
+        set tArtist to artist of t
+        set tAlbum to album of t
+        set output to output & tName & "|||" & tArtist & "|||" & tAlbum & "\\n"
+    end repeat
+    return output
+end tell
+"""
+            try:
+                track_raw = _run_script(track_script)
+                tracks = []
+                for line in track_raw.splitlines():
+                    parts = line.split("|||")
+                    if len(parts) == 3:
+                        tracks.append({
+                            "name": parts[0],
+                            "artist": parts[1],
+                            "album": parts[2],
+                        })
+                playlists.append({"name": pl_name, "tracks": tracks})
+            except RuntimeError:
+                continue
+
         return playlists
 
     def get_saved_albums(self):
+        """Return albums in the library (deduplicated by name + artist)."""
+        script = """
+tell application "Music"
+    set output to ""
+    set seen to {}
+    repeat with t in (every track of library playlist 1)
+        set albumKey to (album of t) & "|||" & (artist of t)
+        if seen does not contain albumKey then
+            set end of seen to albumKey
+            set output to output & (album of t) & "|||" & (artist of t) & "\\n"
+        end if
+    end repeat
+    return output
+end tell
+"""
+        raw = _run_script(script)
         albums = []
-        offset = 0
-        limit = 100
-        while True:
-            data = self._get(
-                "/me/library/albums",
-                params={"limit": limit, "offset": offset},
-            )
-            items = data.get("data", [])
-            for item in items:
-                attrs = item.get("attributes", {})
-                albums.append(
-                    {
-                        "name": attrs.get("name"),
-                        "artist": attrs.get("artistName"),
-                        "upc": attrs.get("upc"),
-                    }
-                )
-            if len(items) < limit:
-                break
-            offset += limit
-        print(f"  Apple Music: found {len(albums)} saved albums")
+        for line in raw.splitlines():
+            parts = line.split("|||")
+            if len(parts) == 2:
+                albums.append({"name": parts[0], "artist": parts[1]})
         return albums
-
-    def _get_playlist_tracks(self, playlist_id):
-        tracks = []
-        offset = 0
-        limit = 100
-        while True:
-            data = self._get(
-                f"/me/library/playlists/{playlist_id}/tracks",
-                params={"limit": limit, "offset": offset},
-            )
-            items = data.get("data", [])
-            for item in items:
-                attrs = item.get("attributes", {})
-                tracks.append(
-                    {
-                        "name": attrs.get("name"),
-                        "artist": attrs.get("artistName"),
-                        "album": attrs.get("albumName"),
-                        "isrc": attrs.get("isrc"),
-                        "duration_ms": attrs.get("durationInMillis"),
-                    }
-                )
-            if len(items) < limit:
-                break
-            offset += limit
-        return tracks
 
     # ------------------------------------------------------------------ #
     # Write                                                                #
     # ------------------------------------------------------------------ #
 
-    def add_liked_songs(self, tracks):
+    def add_liked_songs(self, tracks, progress_cb=None):
         added, failed = 0, []
-        for track in tracks:
-            catalog_id = self._search_track(track)
-            if catalog_id:
-                self._post(
-                    "/me/library",
-                    {"ids[songs]": [catalog_id]},
-                )
-                added += 1
-            else:
+        total = len(tracks)
+        for i, track in enumerate(tracks):
+            safe_name = track["name"].replace('"', '\\"')
+            safe_artist = track["artist"].replace('"', '\\"')
+            script = f"""
+tell application "Music"
+    set results to (every track of library playlist 1 whose name is "{safe_name}" and artist is "{safe_artist}")
+    if length of results > 0 then
+        set loved of (item 1 of results) to true
+        return "ok"
+    else
+        return "notfound"
+    end if
+end tell
+"""
+            try:
+                result = _run_script(script)
+                if result == "ok":
+                    added += 1
+                else:
+                    failed.append(track)
+            except RuntimeError:
                 failed.append(track)
+
+            if progress_cb:
+                progress_cb(i + 1, total)
+
         return added, failed
 
-    def create_playlist(self, name, description, tracks):
-        # Create empty playlist
-        body = {
-            "attributes": {
-                "name": name,
-                "description": description or "",
-            }
-        }
-        data = self._post("/me/library/playlists", body)
-        playlist_id = data["data"][0]["id"]
+    def create_playlist(self, name, tracks, progress_cb=None):
+        safe_name = name.replace('"', '\\"')
+        # Create the playlist
+        _run_script(f'tell application "Music" to make new user playlist with properties {{name:"{safe_name}"}}')
 
-        track_ids = []
-        failed = []
-        for track in tracks:
-            tid = self._search_track(track)
-            if tid:
-                track_ids.append({"id": tid, "type": "songs"})
-            else:
+        added, failed = 0, []
+        total = len(tracks)
+        for i, track in enumerate(tracks):
+            safe_track = track["name"].replace('"', '\\"')
+            safe_artist = track["artist"].replace('"', '\\"')
+            script = f"""
+tell application "Music"
+    set results to (every track of library playlist 1 whose name is "{safe_track}" and artist is "{safe_artist}")
+    if length of results > 0 then
+        duplicate (item 1 of results) to user playlist "{safe_name}"
+        return "ok"
+    else
+        return "notfound"
+    end if
+end tell
+"""
+            try:
+                result = _run_script(script)
+                if result == "ok":
+                    added += 1
+                else:
+                    failed.append(track)
+            except RuntimeError:
                 failed.append(track)
 
-        if track_ids:
-            self._post(
-                f"/me/library/playlists/{playlist_id}/tracks",
-                {"data": track_ids},
-            )
+            if progress_cb:
+                progress_cb(i + 1, total)
 
-        return len(track_ids), failed
+        return added, failed
 
-    def save_albums(self, albums):
+    def save_albums(self, albums, progress_cb=None):
+        """Albums in Apple Music library are implicit — just report what exists."""
+        # In Music.app, albums are collections of tracks. We can't
+        # "save an album" the same way Spotify does, so we report matches.
         added, failed = 0, []
-        for album in albums:
-            catalog_id = self._search_album(album)
-            if catalog_id:
-                self._post("/me/library", {"ids[albums]": [catalog_id]})
-                added += 1
-            else:
+        total = len(albums)
+
+        for i, album in enumerate(albums):
+            safe_album = album["name"].replace('"', '\\"')
+            safe_artist = album["artist"].replace('"', '\\"')
+            script = f"""
+tell application "Music"
+    set results to (every track of library playlist 1 whose album is "{safe_album}" and artist is "{safe_artist}")
+    if length of results > 0 then
+        return "found"
+    else
+        return "notfound"
+    end if
+end tell
+"""
+            try:
+                result = _run_script(script)
+                if result == "found":
+                    added += 1
+                else:
+                    failed.append(album)
+            except RuntimeError:
                 failed.append(album)
+
+            if progress_cb:
+                progress_cb(i + 1, total)
+
         return added, failed
-
-    def _search_track(self, track):
-        """Search catalog by ISRC first, fall back to term search."""
-        if track.get("isrc"):
-            data = self._get(
-                "/catalog/us/songs",
-                params={"filter[isrc]": track["isrc"]},
-            )
-            items = data.get("data", [])
-            if items:
-                return items[0]["id"]
-
-        term = f"{track['name']} {track['artist']}"
-        data = self._get(
-            "/catalog/us/search",
-            params={"term": term, "types": "songs", "limit": 1},
-        )
-        results = data.get("results", {}).get("songs", {}).get("data", [])
-        return results[0]["id"] if results else None
-
-    def _search_album(self, album):
-        term = f"{album['name']} {album['artist']}"
-        data = self._get(
-            "/catalog/us/search",
-            params={"term": term, "types": "albums", "limit": 1},
-        )
-        results = data.get("results", {}).get("albums", {}).get("data", [])
-        return results[0]["id"] if results else None
