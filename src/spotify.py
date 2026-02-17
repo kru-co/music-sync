@@ -20,7 +20,7 @@ CACHE_PATH = os.path.expanduser("~/.music-sync/.spotify_cache")
 
 
 class SpotifyClient:
-    def __init__(self, client_id, client_secret, redirect_uri="http://localhost:8888/callback"):
+    def __init__(self, client_id, client_secret, redirect_uri="http://127.0.0.1:8888/callback"):
         os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
         self.sp = spotipy.Spotify(
             auth_manager=SpotifyOAuth(
